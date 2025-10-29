@@ -4,7 +4,7 @@ pub enum Error {
     DlSymError,
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android"))] // contains ohos
 pub mod linux {
     use super::Error;
     use libc::{dlclose, dlopen, dlsym, RTLD_LAZY, RTLD_LOCAL};

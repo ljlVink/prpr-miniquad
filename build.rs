@@ -10,4 +10,8 @@ fn main() {
     if target.contains("ios") {
         println!("cargo:rustc-link-lib=framework=OpenGLES");
     }
+    //ohos uses napi_build_ohos to make a napi module
+    #[cfg(target_env = "ohos")]
+    napi_build_ohos::setup();
+
 }
