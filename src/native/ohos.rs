@@ -3,6 +3,10 @@ use ohos_xcomponent_sys::{
     OH_NativeXComponent,OH_NativeXComponent_RegisterKeyEventCallback, OH_NativeXComponent_GetKeyEvent, OH_NativeXComponent_GetKeyEventAction,
     OH_NativeXComponent_GetKeyEventCode
 };
+use ohos_input_sys::input_manager::*;
+use ohos_sys_opaque_types::{
+    Input_AxisEvent, Input_MouseEvent, Input_TouchEvent,
+};
 use ohos_hilog_binding::{hilog_error, hilog_fatal, hilog_info};
 use crate::{
     event::{EventHandler, KeyCode, TouchPhase},
@@ -13,15 +17,17 @@ use crate::{
     GraphicsContext,
 };
 mod keycodes;
-
+use napi_derive_ohos::napi;
+use napi_ohos::{
+    threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
+    bindgen_prelude::*
+};
 pub use crate::gl::{self, *};
 use crate::{OHOS_ENV, OHOS_EXPORTS};
-use std::{cell::RefCell, sync::mpsc, thread};
-use ohos_ime_binding::IME;
-use std::sync::{LazyLock, Mutex};
-
-//TODO
-static IME_INSTANCE: LazyLock<Mutex<Option<IME>>> = LazyLock::new(|| Mutex::new(None));
+use std::{sync::OnceLock,cell::RefCell, sync::mpsc, thread};
+static REQUEST_CALLBACK: OnceLock<
+    ThreadsafeFunction<String, (), String, napi_ohos::Status, false, false, 1>,
+> = OnceLock::new();
 
 #[derive(Debug)]
 enum Message {
@@ -95,14 +101,14 @@ impl NativeDisplay for OHOSDisplay {
     fn show_mouse(&mut self, _shown: bool) {}
     fn set_mouse_cursor(&mut self, _cursor: crate::CursorIcon) {}
     fn set_window_size(&mut self, _new_width: u32, _new_height: u32) {}
-    fn set_fullscreen(&mut self, fullscreen: bool) {
+    fn set_fullscreen(&mut self, _: bool) {
     }
     fn clipboard_get(&mut self) -> Option<String> {
         None
     }
-    fn clipboard_set(&mut self, data: &str) {}
+    fn clipboard_set(&mut self, _: &str) {}
     
-    fn show_keyboard(&mut self, show: bool) {
+    fn show_keyboard(&mut self, _: bool) {
     }
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self as _
@@ -264,9 +270,9 @@ impl MainThreadState {
 
 }
 fn register_xcomponent_callbacks(xcomponent: &XComponent) -> napi_ohos::Result<()> {
-    let nativeXComponent = xcomponent.raw();
+    let native_xcomponent = xcomponent.raw();
     let res = unsafe {
-        OH_NativeXComponent_RegisterKeyEventCallback(nativeXComponent, Some(on_dispatch_key_event))
+        OH_NativeXComponent_RegisterKeyEventCallback(native_xcomponent, Some(on_dispatch_key_event))
     };
     if res != 0 {
         hilog_error!("Failed to register key event callbacks");
@@ -295,10 +301,10 @@ pub unsafe extern "C" fn on_dispatch_key_event(
     assert!(ret == 0, "Get key event code failed");
 
     let keycode = keycodes::translate_keycode(code);
-    if(action == 0){
+    if action == 0 {
         send_message(Message::KeyDown { keycode });
     }
-    else if (action == 1){
+    else if action == 1{
         send_message(Message::KeyUp { keycode });
     }
 }
@@ -314,7 +320,7 @@ where
     panic::set_hook(Box::new(|info|{
         hilog_fatal!(info)
     }));
-    register_xcomponent_callbacks(&xcomponent);
+    let _ = register_xcomponent_callbacks(&xcomponent);
     struct SendHack<F>(F);
     unsafe impl<F> Send for SendHack<F> {}
     let f = SendHack(f);
@@ -339,7 +345,7 @@ where
         };
         let (screen_width, screen_height) = 'a: loop {
             match rx.try_recv() {
-                Ok(Message::SurfaceChanged { window, width, height }) => {
+                Ok(Message::SurfaceChanged { window: _, width, height }) => {
                     break 'a (width as f32, height as f32);
                 }   
                 _ => {}
@@ -444,36 +450,97 @@ where
         send_message(Message::SurfaceDestroyed);
         Ok(())
     });
-
-    xcomponent.on_touch_event(|_xcomponent, _win, data| {
-        // Process all touch points for multi-touch support
-        for i in 0..data.num_points {
-            let touch_point = &data.touch_points[i as usize];
-            let phase = match touch_point.event_type {
-                ohos_xcomponent_binding::TouchEvent::Down => TouchPhase::Started,
-                ohos_xcomponent_binding::TouchEvent::Up => TouchPhase::Ended,
-                ohos_xcomponent_binding::TouchEvent::Move => TouchPhase::Moved,
-                ohos_xcomponent_binding::TouchEvent::Cancel => TouchPhase::Cancelled,
-                _ => TouchPhase::Cancelled, // Default to cancelled for unknown events
-            };
-            send_message(Message::Touch {
-                phase,
-                touch_id: touch_point.id as u64,
-                x: touch_point.x,
-                y: touch_point.y,
-                time: (touch_point.timestamp / 1_000_000) as u64,
-            });
-        }
-        Ok(())
-    });
-    xcomponent.register_callback();
-
-    xcomponent.on_frame_callback(|_, _, _| {
+    if !set_interceptor_state(true){
+        hilog_info!("falling back to touch event.");
+        xcomponent.on_touch_event(|_xcomponent, _win, data| {
+            for i in 0..data.num_points {
+                let touch_point = &data.touch_points[i as usize];
+                let phase = match touch_point.event_type {
+                    ohos_xcomponent_binding::TouchEvent::Down => TouchPhase::Started,
+                    ohos_xcomponent_binding::TouchEvent::Up => TouchPhase::Ended,
+                    ohos_xcomponent_binding::TouchEvent::Move => TouchPhase::Moved,
+                    ohos_xcomponent_binding::TouchEvent::Cancel => TouchPhase::Cancelled,
+                    _ => TouchPhase::Cancelled, // Default to cancelled for unknown events
+                };
+                send_message(Message::Touch {
+                    phase,
+                    touch_id: touch_point.id as u64,
+                    x: touch_point.x,
+                    y: touch_point.y,
+                    time: (touch_point.timestamp / 1_000_000) as u64,
+                });
+            }
+            Ok(())
+        });
+    }
+    
+    let _ = xcomponent.register_callback();
+    let _ = xcomponent.on_frame_callback(|_, _, _| {
         Ok(())
     });
 
 }
 
+#[napi]
+fn set_interceptor_state(state: bool) -> bool {
+    if state{
+        let callback = Box::new(Input_InterceptorEventCallback {
+            mouseCallback: Some(mouse_event_callback),
+            touchCallback: Some(touch_event_callback),
+            axisCallback: Some(axis_event_callback),
+        });
+        unsafe {
+            let ret = OH_Input_AddInputEventInterceptor(Box::leak(callback), std::ptr::null_mut());
+            if ret.is_err(){
+                hilog_info!("add input Event Interceptor failed , ret: {:?}", ret);
+                return false;
+            }
+        }
+    }else{
+        unsafe {
+            let _ = OH_Input_RemoveInputEventInterceptor();
+        }
+    }
+    return true;
+}
+
+#[no_mangle]
+unsafe extern "C" fn touch_event_callback(touch_event: *const Input_TouchEvent){
+    if !touch_event.is_null() {
+        let action = OH_Input_GetTouchEventAction(touch_event);
+        let x = OH_Input_GetTouchEventDisplayX(touch_event);
+        let y = OH_Input_GetTouchEventDisplayY(touch_event);
+        let finger_id = OH_Input_GetTouchEventFingerId(touch_event);
+        let action_time = OH_Input_GetTouchEventActionTime(touch_event);
+        let phase = match action {
+            1 => TouchPhase::Started,
+            2 => TouchPhase::Moved,
+            3 => TouchPhase::Ended,
+            _ => TouchPhase::Cancelled,
+        };
+        send_message(Message::Touch {
+            phase,
+            touch_id: finger_id as u64,
+            x: x as f32,
+            y: y as f32,
+            time: (action_time / 1000) as u64,
+        });
+    }
+}
+
+unsafe extern "C" fn mouse_event_callback(mouse_event: *const Input_MouseEvent) {
+    if !mouse_event.is_null() {
+        unsafe {
+            let _action = OH_Input_GetMouseEventAction(mouse_event);
+            let _x = OH_Input_GetMouseEventDisplayX(mouse_event);
+            let _y = OH_Input_GetMouseEventDisplayY(mouse_event);
+        }
+    }
+}
+
+unsafe extern "C" fn axis_event_callback(_axis_event: *const Input_AxisEvent) {
+    
+}
 
 
 pub fn load_file<F: Fn(crate::fs::Response) + 'static>(path: &str, on_loaded: F) {
@@ -489,4 +556,23 @@ fn load_file_sync(path: &str) -> crate::fs::Response {
     let mut file = File::open(&full_path)?;
     file.read_to_end(&mut response)?;
     Ok(response)
+}
+
+#[napi]
+pub fn register_arkts_callback(callback: Function<String, ()>) -> napi_ohos::Result<()> {
+    let tsfn_builder = callback.build_threadsafe_function();
+    let tsfn = tsfn_builder.max_queue_size::<1>().build()?;
+    let _ = REQUEST_CALLBACK.set(tsfn);
+    Ok(())
+}
+
+pub fn call_request_callback(value: String) {
+    if let Some(tsfn) = REQUEST_CALLBACK.get() {
+        let status = tsfn.call(value, ThreadsafeFunctionCallMode::NonBlocking);
+        if !matches!(status, napi_ohos::Status::Ok) {
+            hilog_error!(format!("Failed to call ArkTS callback: {:?}", status));
+        }
+    } else {
+        hilog_error!("REQUEST_CALLBACK not initialized");
+    }
 }
