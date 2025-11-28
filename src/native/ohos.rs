@@ -144,7 +144,7 @@ impl MainThreadState {
 
     unsafe fn update_surface(&mut self, window: WindowRaw) {
         self.window = window;
-        if self.surface.is_null() == false {
+        if !self.surface.is_null() {
             self.destroy_surface();
         }
         self.surface = (self.libegl.eglCreateWindowSurface.unwrap())(
@@ -301,11 +301,10 @@ pub unsafe extern "C" fn on_dispatch_key_event(
     assert!(ret == 0, "Get key event code failed");
 
     let keycode = keycodes::translate_keycode(code);
-    if action == 0 {
-        send_message(Message::KeyDown { keycode });
-    }
-    else if action == 1{
-        send_message(Message::KeyUp { keycode });
+    match action {
+        0 => send_message(Message::KeyDown { keycode }),
+        1 => send_message(Message::KeyUp { keycode }),
+        _ => (),
     }
 }
 
@@ -313,13 +312,13 @@ pub unsafe fn run<F>(conf: crate::conf::Conf, f: F)
 where
     F: 'static + FnOnce(&mut crate::Context) -> Box<dyn EventHandler>,
 {
-    let env = OHOS_ENV.as_ref().expect("OHOS_ENV is not initialized");
-    let exports = OHOS_EXPORTS.as_ref().expect("OHOS_EXPORTS is not initialized");
-    let xcomponent = XComponent::init(*env, *exports).expect("Failed to initialize XComponent");
     use std::panic;
     panic::set_hook(Box::new(|info|{
         hilog_fatal!(info)
     }));
+    let env = OHOS_ENV.as_ref().expect("OHOS_ENV is not initialized");
+    let exports = OHOS_EXPORTS.as_ref().expect("OHOS_EXPORTS is not initialized");
+    let xcomponent = XComponent::init(*env, *exports).expect("Failed to initialize XComponent");
     let _ = register_xcomponent_callbacks(&xcomponent);
     struct SendHack<F>(F);
     unsafe impl<F> Send for SendHack<F> {}
