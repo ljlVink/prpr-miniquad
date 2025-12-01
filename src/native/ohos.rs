@@ -557,13 +557,8 @@ pub fn load_file<F: Fn(crate::fs::Response) + 'static>(path: &str, on_loaded: F)
 }
 
 fn load_file_sync(path: &str) -> crate::fs::Response {
-    use std::fs::File;
-    use std::io::Read;
-    let full_path: String = format!("/data/storage/el1/bundle/entry/resources/resfile/{}", path);
-    let mut response = vec![];
-    let mut file = File::open(&full_path)?;
-    file.read_to_end(&mut response)?;
-    Ok(response)
+    let full_path = format!("/data/storage/el1/bundle/entry/resources/resfile/{}", path);
+    std::fs::read(&full_path).map_err(Into::into)
 }
 
 #[napi]
