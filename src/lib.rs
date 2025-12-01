@@ -5,7 +5,10 @@ pub mod graphics;
 
 pub mod native;
 
+#[cfg(target_env = "ohos")]
 use napi_derive_ohos::napi;
+
+#[cfg(target_env = "ohos")]
 use napi_ohos::{bindgen_prelude::Object, Env, Result};
 
 #[cfg(feature = "log-impl")]
@@ -245,7 +248,10 @@ extern "C" {
     fn quad_main();
 }
 
+#[cfg(target_env = "ohos")]
 static mut OHOS_EXPORTS: Option<Object<'static>> = None;
+
+#[cfg(target_env = "ohos")]
 static mut OHOS_ENV: Option<Env> = None;
 
 #[cfg(target_env = "ohos")]

@@ -299,8 +299,8 @@ pub unsafe extern "C" fn on_dispatch_key_event(
     let ret = OH_NativeXComponent_GetKeyEventAction(event, &mut action);
     assert!(ret == 0, "Get key event action failed");
 
-    let mut code = 0;
-    let ret = OH_NativeXComponent_GetKeyEventCode(event, &mut code);
+    let mut code = ohos_input_sys::key_code::Input_KeyCode::KEYCODE_FN;
+    let ret = OH_NativeXComponent_GetKeyEventCode(event, &mut std::mem::transmute(code));
     assert!(ret == 0, "Get key event code failed");
 
     let keycode = keycodes::translate_keycode(code);
