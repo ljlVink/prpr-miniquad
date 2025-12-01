@@ -1,30 +1,27 @@
-use ohos_xcomponent_binding::{XComponent,WindowRaw};
-use ohos_xcomponent_sys::{
-    OH_NativeXComponent,OH_NativeXComponent_RegisterKeyEventCallback, OH_NativeXComponent_GetKeyEvent, OH_NativeXComponent_GetKeyEventAction,
-    OH_NativeXComponent_GetKeyEventCode
-};
-use ohos_input_sys::input_manager::*;
-use ohos_sys_opaque_types::{
-    Input_AxisEvent, Input_MouseEvent, Input_TouchEvent,
-};
-use ohos_hilog_binding::{hilog_error, hilog_fatal, hilog_info};
 use crate::{
     event::{EventHandler, KeyCode, TouchPhase},
-    native::{
-        egl::{self, LibEgl},
-    },
+    native::egl::{self, LibEgl},
     native::NativeDisplay,
     GraphicsContext,
 };
-mod keycodes;
-use napi_derive_ohos::napi;
-use napi_ohos::{
-    threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
-    bindgen_prelude::*
+use ohos_hilog_binding::{hilog_error, hilog_fatal, hilog_info};
+use ohos_input_sys::input_manager::*;
+use ohos_sys_opaque_types::{Input_AxisEvent, Input_MouseEvent, Input_TouchEvent};
+use ohos_xcomponent_binding::{WindowRaw, XComponent};
+use ohos_xcomponent_sys::{
+    OH_NativeXComponent, OH_NativeXComponent_ExpectedRateRange, OH_NativeXComponent_GetKeyEvent,
+    OH_NativeXComponent_GetKeyEventAction, OH_NativeXComponent_GetKeyEventCode,
+    OH_NativeXComponent_RegisterKeyEventCallback, OH_NativeXComponent_SetExpectedFrameRateRange,
 };
+mod keycodes;
 pub use crate::gl::{self, *};
 use crate::{OHOS_ENV, OHOS_EXPORTS};
-use std::{sync::OnceLock,cell::RefCell, sync::mpsc, thread};
+use napi_derive_ohos::napi;
+use napi_ohos::{
+    bindgen_prelude::*,
+    threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
+};
+use std::{cell::RefCell, sync::mpsc, sync::OnceLock, thread};
 static REQUEST_CALLBACK: OnceLock<
     ThreadsafeFunction<String, (), String, napi_ohos::Status, false, false, 1>,
 > = OnceLock::new();
@@ -74,14 +71,11 @@ fn send_message(message: Message) {
     })
 }
 
-
 struct OHOSDisplay {
     screen_width: f32,
     screen_height: f32,
     fullscreen: bool,
 }
-
-
 
 impl NativeDisplay for OHOSDisplay {
     fn screen_size(&self) -> (f32, f32) {
@@ -93,29 +87,24 @@ impl NativeDisplay for OHOSDisplay {
     fn high_dpi(&self) -> bool {
         true
     }
-    fn order_quit(&mut self) {
-    }
+    fn order_quit(&mut self) {}
     fn request_quit(&mut self) {}
     fn cancel_quit(&mut self) {}
     fn set_cursor_grab(&mut self, _grab: bool) {}
     fn show_mouse(&mut self, _shown: bool) {}
     fn set_mouse_cursor(&mut self, _cursor: crate::CursorIcon) {}
     fn set_window_size(&mut self, _new_width: u32, _new_height: u32) {}
-    fn set_fullscreen(&mut self, _: bool) {
-    }
+    fn set_fullscreen(&mut self, _: bool) {}
     fn clipboard_get(&mut self) -> Option<String> {
         None
     }
     fn clipboard_set(&mut self, _: &str) {}
-    
-    fn show_keyboard(&mut self, _: bool) {
-    }
+
+    fn show_keyboard(&mut self, _: bool) {}
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self as _
     }
 }
-
-
 
 struct MainThreadState {
     libegl: LibEgl,
@@ -156,7 +145,10 @@ impl MainThreadState {
 
         if self.surface.is_null() {
             let error = (self.libegl.eglGetError.unwrap())();
-            hilog_fatal!(format!("Failed to create EGL window surface, EGL error: {}", error));
+            hilog_fatal!(format!(
+                "Failed to create EGL window surface, EGL error: {}",
+                error
+            ));
             // Additional debugging information
             return;
         }
@@ -169,7 +161,10 @@ impl MainThreadState {
 
         if res == 0 {
             let error = (self.libegl.eglGetError.unwrap())();
-            hilog_fatal!(format!("Failed to make EGL context current, EGL error: {}", error));
+            hilog_fatal!(format!(
+                "Failed to make EGL context current, EGL error: {}",
+                error
+            ));
         }
     }
 
@@ -197,7 +192,6 @@ impl MainThreadState {
                     width as _,
                     height as _,
                 );
-
             }
             Message::Touch {
                 phase,
@@ -244,10 +238,9 @@ impl MainThreadState {
             Message::Pause => self
                 .event_handler
                 .window_minimized_event(self.context.with_display(&mut self.display)),
-            Message::Resume => {
-                self.event_handler
-                    .window_restored_event(self.context.with_display(&mut self.display))
-            }
+            Message::Resume => self
+                .event_handler
+                .window_restored_event(self.context.with_display(&mut self.display)),
             Message::Destroy => {
                 self.quit = true;
             }
@@ -258,7 +251,7 @@ impl MainThreadState {
         self.event_handler
             .update(self.context.with_display(&mut self.display));
 
-        if self.surface.is_null() == false {
+        if !self.surface.is_null() {
             self.event_handler
                 .draw(self.context.with_display(&mut self.display));
 
@@ -267,7 +260,6 @@ impl MainThreadState {
             }
         }
     }
-
 }
 fn register_xcomponent_callbacks(xcomponent: &XComponent) -> napi_ohos::Result<()> {
     let native_xcomponent = xcomponent.raw();
@@ -283,11 +275,23 @@ fn register_xcomponent_callbacks(xcomponent: &XComponent) -> napi_ohos::Result<(
     Ok(())
 }
 
+fn set_display_sync(xcomponent: &XComponent) -> bool {
+    let native_xcomponent = xcomponent.raw();
+    let mut expected_rate_range = OH_NativeXComponent_ExpectedRateRange {
+        min: 110,
+        max: 120,
+        expected: 120,
+    };
+    let res = unsafe {
+        OH_NativeXComponent_SetExpectedFrameRateRange(native_xcomponent, &mut expected_rate_range)
+    };
+    hilog_info!("Set display sync: {}", res);
+    res == 0
+}
 pub unsafe extern "C" fn on_dispatch_key_event(
     xcomponent: *mut OH_NativeXComponent,
     window: *mut std::os::raw::c_void,
-)
-{
+) {
     let mut event = std::ptr::null_mut();
     let ret = OH_NativeXComponent_GetKeyEvent(xcomponent, &mut event);
     assert!(ret == 0, "Get key event failed");
@@ -313,13 +317,14 @@ where
     F: 'static + FnOnce(&mut crate::Context) -> Box<dyn EventHandler>,
 {
     use std::panic;
-    panic::set_hook(Box::new(|info|{
-        hilog_fatal!(info)
-    }));
+    panic::set_hook(Box::new(|info| hilog_fatal!(info)));
     let env = OHOS_ENV.as_ref().expect("OHOS_ENV is not initialized");
-    let exports = OHOS_EXPORTS.as_ref().expect("OHOS_EXPORTS is not initialized");
+    let exports = OHOS_EXPORTS
+        .as_ref()
+        .expect("OHOS_EXPORTS is not initialized");
     let xcomponent = XComponent::init(*env, *exports).expect("Failed to initialize XComponent");
     let _ = register_xcomponent_callbacks(&xcomponent);
+    set_display_sync(&xcomponent);
     struct SendHack<F>(F);
     unsafe impl<F> Send for SendHack<F> {}
     let f = SendHack(f);
@@ -344,16 +349,20 @@ where
         };
         let (screen_width, screen_height) = 'a: loop {
             match rx.try_recv() {
-                Ok(Message::SurfaceChanged { window: _, width, height }) => {
+                Ok(Message::SurfaceChanged {
+                    window: _,
+                    width,
+                    height,
+                }) => {
                     break 'a (width as f32, height as f32);
-                }   
+                }
                 _ => {}
             }
         };
         let (egl_context, egl_config, egl_display) = crate::native::egl::create_egl_context(
             &mut libegl,
             std::ptr::null_mut(), /* EGL_DEFAULT_DISPLAY */
-            true, // force set rgba 8888 for ohos
+            true,                 // force set rgba 8888 for ohos
         )
         .expect("Cant create EGL context");
 
@@ -375,7 +384,7 @@ where
         if (libegl.eglMakeCurrent.unwrap())(egl_display, surface, surface, egl_context) == 0 {
             panic!();
         }
-        
+
         let mut context = GraphicsContext::new(gl::is_gl2());
 
         let mut display = OHOSDisplay {
@@ -426,13 +435,17 @@ where
         (s.libegl.eglDestroyContext.unwrap())(s.egl_display, s.egl_context);
         (s.libegl.eglTerminate.unwrap())(s.egl_display);
     });
-    
+
     xcomponent.on_surface_created(|xcomponent, win: WindowRaw| {
         send_message(Message::SurfaceCreated { window: win });
         let sz = xcomponent.size(win)?;
         let width = sz.width as i32;
         let height = sz.height as i32;
-        send_message(Message::SurfaceChanged {window: win, width, height });
+        send_message(Message::SurfaceChanged {
+            window: win,
+            width,
+            height,
+        });
         Ok(())
     });
 
@@ -440,16 +453,19 @@ where
         let sz = xcomponent.size(win)?;
         let width = sz.width as i32;
         let height = sz.height as i32;
-        send_message(Message::SurfaceChanged { window: win, width, height });
+        send_message(Message::SurfaceChanged {
+            window: win,
+            width,
+            height,
+        });
         Ok(())
     });
 
     xcomponent.on_surface_destroyed(|_xcomponent, _win| {
-        
         send_message(Message::SurfaceDestroyed);
         Ok(())
     });
-    if !set_interceptor_state(true){
+    if !set_interceptor_state(true) {
         hilog_info!("falling back to touch event.");
         xcomponent.on_touch_event(|_xcomponent, _win, data| {
             for i in 0..data.num_points {
@@ -472,17 +488,14 @@ where
             Ok(())
         });
     }
-    
-    let _ = xcomponent.register_callback();
-    let _ = xcomponent.on_frame_callback(|_, _, _| {
-        Ok(())
-    });
 
+    let _ = xcomponent.register_callback();
+    let _ = xcomponent.on_frame_callback(|_, _, _| Ok(()));
 }
 
 #[napi]
 fn set_interceptor_state(state: bool) -> bool {
-    if state{
+    if state {
         let callback = Box::new(Input_InterceptorEventCallback {
             mouseCallback: Some(mouse_event_callback),
             touchCallback: Some(touch_event_callback),
@@ -490,12 +503,12 @@ fn set_interceptor_state(state: bool) -> bool {
         });
         unsafe {
             let ret = OH_Input_AddInputEventInterceptor(Box::leak(callback), std::ptr::null_mut());
-            if ret.is_err(){
+            if ret.is_err() {
                 hilog_info!("add input Event Interceptor failed , ret: {:?}", ret);
                 return false;
             }
         }
-    }else{
+    } else {
         unsafe {
             let _ = OH_Input_RemoveInputEventInterceptor();
         }
@@ -504,7 +517,7 @@ fn set_interceptor_state(state: bool) -> bool {
 }
 
 #[no_mangle]
-unsafe extern "C" fn touch_event_callback(touch_event: *const Input_TouchEvent){
+unsafe extern "C" fn touch_event_callback(touch_event: *const Input_TouchEvent) {
     if !touch_event.is_null() {
         let action = OH_Input_GetTouchEventAction(touch_event);
         let x = OH_Input_GetTouchEventDisplayX(touch_event);
@@ -537,10 +550,7 @@ unsafe extern "C" fn mouse_event_callback(mouse_event: *const Input_MouseEvent) 
     }
 }
 
-unsafe extern "C" fn axis_event_callback(_axis_event: *const Input_AxisEvent) {
-    
-}
-
+unsafe extern "C" fn axis_event_callback(_axis_event: *const Input_AxisEvent) {}
 
 pub fn load_file<F: Fn(crate::fs::Response) + 'static>(path: &str, on_loaded: F) {
     let response = load_file_sync(path);
@@ -550,7 +560,7 @@ pub fn load_file<F: Fn(crate::fs::Response) + 'static>(path: &str, on_loaded: F)
 fn load_file_sync(path: &str) -> crate::fs::Response {
     use std::fs::File;
     use std::io::Read;
-    let full_path: String = format!("/data/storage/el1/bundle/entry/resources/resfile/{}", path);    
+    let full_path: String = format!("/data/storage/el1/bundle/entry/resources/resfile/{}", path);
     let mut response = vec![];
     let mut file = File::open(&full_path)?;
     file.read_to_end(&mut response)?;

@@ -188,7 +188,7 @@ where
     unsafe {
         native::ohos::run(conf, f);
     }
-    #[cfg(all(target_os = "linux",not(target_env = "ohos")))]
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     {
         let mut f = Some(f);
         let f = &mut f;
@@ -239,7 +239,6 @@ where
         native::ios::run(conf, f);
     }
 }
-
 
 #[cfg(target_env = "ohos")]
 extern "C" {

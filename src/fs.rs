@@ -45,7 +45,12 @@ pub fn load_file<F: Fn(Response) + 'static>(path: &str, on_loaded: F) {
     #[cfg(target_env = "ohos")]
     ohos::load_file(path, on_loaded);
 
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios",target_env = "ohos")))]
+    #[cfg(not(any(
+        target_arch = "wasm32",
+        target_os = "android",
+        target_os = "ios",
+        target_env = "ohos"
+    )))]
     load_file_desktop(path, on_loaded);
 }
 

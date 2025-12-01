@@ -327,7 +327,10 @@ pub fn define_app_delegate() -> *const Class {
             let _: () = msg_send![view_ctrl_obj, setView: glk_view_obj];
             let _: () = msg_send![view_ctrl_obj, setPreferredFramesPerSecond: 120];
             let _: () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
-            let _: () = msg_send![view_ctrl_obj, setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+            let _: () = msg_send![
+                view_ctrl_obj,
+                setNeedsUpdateOfScreenEdgesDeferringSystemGestures
+            ];
 
             *VIEW_CTRL_OBJ.lock().unwrap() = view_ctrl_obj as _;
 
