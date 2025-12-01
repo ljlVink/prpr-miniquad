@@ -149,7 +149,6 @@ impl MainThreadState {
                 "Failed to create EGL window surface, EGL error: {}",
                 error
             ));
-            // Additional debugging information
             return;
         }
         let res = (self.libegl.eglMakeCurrent.unwrap())(
