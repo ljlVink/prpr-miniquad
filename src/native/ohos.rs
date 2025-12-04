@@ -6,12 +6,17 @@ use crate::{
 };
 use ohos_hilog_binding::{hilog_error, hilog_fatal, hilog_info};
 use ohos_input_sys::input_manager::*;
-use ohos_sys_opaque_types::{Input_AxisEvent, Input_MouseEvent, Input_TouchEvent};
+use ohos_input_sys::key_code::Input_KeyCode;
+use ohos_sys_opaque_types::{Input_KeyEvent, Input_TouchEvent};
+use ohos_window_manager_sys::window_comm::WindowManagerResult;
+use ohos_window_manager_sys::window_event_filter::{
+    OH_NativeWindowManager_RegisterKeyEventFilter, OH_NativeWindowManager_RegisterTouchEventFilter,
+    OH_NativeWindowManager_UnregisterKeyEventFilter,
+    OH_NativeWindowManager_UnregisterTouchEventFilter,
+};
 use ohos_xcomponent_binding::{WindowRaw, XComponent};
 use ohos_xcomponent_sys::{
-    OH_NativeXComponent, OH_NativeXComponent_ExpectedRateRange, OH_NativeXComponent_GetKeyEvent,
-    OH_NativeXComponent_GetKeyEventAction, OH_NativeXComponent_GetKeyEventCode,
-    OH_NativeXComponent_RegisterKeyEventCallback, OH_NativeXComponent_SetExpectedFrameRateRange,
+    OH_NativeXComponent_ExpectedRateRange, OH_NativeXComponent_SetExpectedFrameRateRange,
 };
 mod keycodes;
 pub use crate::gl::{self, *};
@@ -21,10 +26,18 @@ use napi_ohos::{
     bindgen_prelude::*,
     threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
-use std::{cell::RefCell, sync::mpsc, sync::OnceLock, thread};
+use std::{
+    cell::RefCell,
+    sync::atomic::{AtomicI32, Ordering},
+    sync::mpsc,
+    sync::OnceLock,
+    thread,
+};
 static REQUEST_CALLBACK: OnceLock<
     ThreadsafeFunction<String, (), String, napi_ohos::Status, false, false, 1>,
 > = OnceLock::new();
+
+static WINDOW_ID: AtomicI32 = AtomicI32::new(0);
 
 #[derive(Debug)]
 enum Message {
@@ -260,19 +273,6 @@ impl MainThreadState {
         }
     }
 }
-fn register_xcomponent_callbacks(xcomponent: &XComponent) -> napi_ohos::Result<()> {
-    let native_xcomponent = xcomponent.raw();
-    let res = unsafe {
-        OH_NativeXComponent_RegisterKeyEventCallback(native_xcomponent, Some(on_dispatch_key_event))
-    };
-    if res != 0 {
-        hilog_error!("Failed to register key event callbacks");
-    } else {
-        hilog_info!("Registered key event callbacks successfully");
-    }
-
-    Ok(())
-}
 
 fn set_display_sync(xcomponent: &XComponent) -> bool {
     let native_xcomponent = xcomponent.raw();
@@ -287,28 +287,19 @@ fn set_display_sync(xcomponent: &XComponent) -> bool {
     hilog_info!("Set display sync: {}", res);
     res == 0
 }
-pub unsafe extern "C" fn on_dispatch_key_event(
-    xcomponent: *mut OH_NativeXComponent,
-    window: *mut std::os::raw::c_void,
-) {
-    let mut event = std::ptr::null_mut();
-    let ret = OH_NativeXComponent_GetKeyEvent(xcomponent, &mut event);
-    assert!(ret == 0, "Get key event failed");
-
-    let mut action = 0;
-    let ret = OH_NativeXComponent_GetKeyEventAction(event, &mut action);
-    assert!(ret == 0, "Get key event action failed");
-
-    let mut code = ohos_input_sys::key_code::Input_KeyCode::KEYCODE_FN;
-    let ret = OH_NativeXComponent_GetKeyEventCode(event, &mut std::mem::transmute(code));
-    assert!(ret == 0, "Get key event code failed");
-
-    let keycode = keycodes::translate_keycode(code);
-    match action {
-        0 => send_message(Message::KeyDown { keycode }),
-        1 => send_message(Message::KeyUp { keycode }),
-        _ => (),
+unsafe extern "C" fn key_event_filter(key_event: *mut Input_KeyEvent) -> bool {
+    if !key_event.is_null() {
+        let action = OH_Input_GetKeyEventAction(key_event);
+        let code_raw = OH_Input_GetKeyEventKeyCode(key_event);
+        let code: Input_KeyCode = std::mem::transmute(code_raw);
+        let keycode = keycodes::translate_keycode(code);
+        match action {
+            2 => send_message(Message::KeyDown { keycode }),
+            3 => send_message(Message::KeyUp { keycode }),
+            _ => (),
+        }
     }
+    true
 }
 
 pub unsafe fn run<F>(conf: crate::conf::Conf, f: F)
@@ -322,7 +313,6 @@ where
         .as_ref()
         .expect("OHOS_EXPORTS is not initialized");
     let xcomponent = XComponent::init(*env, *exports).expect("Failed to initialize XComponent");
-    let _ = register_xcomponent_callbacks(&xcomponent);
     set_display_sync(&xcomponent);
     struct SendHack<F>(F);
     unsafe impl<F> Send for SendHack<F> {}
@@ -464,59 +454,70 @@ where
         send_message(Message::SurfaceDestroyed);
         Ok(())
     });
-    if !set_interceptor_state(true) {
-        hilog_info!("falling back to touch event.");
-        xcomponent.on_touch_event(|_xcomponent, _win, data| {
-            for i in 0..data.num_points {
-                let touch_point = &data.touch_points[i as usize];
-                let phase = match touch_point.event_type {
-                    ohos_xcomponent_binding::TouchEvent::Down => TouchPhase::Started,
-                    ohos_xcomponent_binding::TouchEvent::Up => TouchPhase::Ended,
-                    ohos_xcomponent_binding::TouchEvent::Move => TouchPhase::Moved,
-                    ohos_xcomponent_binding::TouchEvent::Cancel => TouchPhase::Cancelled,
-                    _ => TouchPhase::Cancelled, // Default to cancelled for unknown events
-                };
-                send_message(Message::Touch {
-                    phase,
-                    touch_id: touch_point.id as u64,
-                    x: touch_point.x,
-                    y: touch_point.y,
-                    time: (touch_point.timestamp / 1_000_000) as u64,
-                });
-            }
-            Ok(())
-        });
-    }
-
     let _ = xcomponent.register_callback();
     let _ = xcomponent.on_frame_callback(|_, _, _| Ok(()));
 }
 
-#[napi]
-fn set_interceptor_state(state: bool) -> bool {
-    if state {
-        let callback = Box::new(Input_InterceptorEventCallback {
-            mouseCallback: Some(mouse_event_callback),
-            touchCallback: Some(touch_event_callback),
-            axisCallback: Some(axis_event_callback),
-        });
-        unsafe {
-            let ret = OH_Input_AddInputEventInterceptor(Box::leak(callback), std::ptr::null_mut());
-            if ret.is_err() {
-                hilog_info!("add input Event Interceptor failed , ret: {:?}", ret);
-                return false;
-            }
-        }
-    } else {
-        unsafe {
-            let _ = OH_Input_RemoveInputEventInterceptor();
-        }
-    }
-    return true;
+fn register_key_event_filter(window_id: i32) -> WindowManagerResult {
+    unsafe { OH_NativeWindowManager_RegisterKeyEventFilter(window_id, Some(key_event_filter)) }
 }
 
-#[no_mangle]
-unsafe extern "C" fn touch_event_callback(touch_event: *const Input_TouchEvent) {
+fn register_touch_event_filter(window_id: i32) -> WindowManagerResult {
+    unsafe { OH_NativeWindowManager_RegisterTouchEventFilter(window_id, Some(touch_event_filter)) }
+}
+
+#[allow(dead_code)]
+#[napi]
+fn register_event_filters(window_id: i32) -> bool {
+    hilog_info!(format!(
+        "Registering event filters for window_id: {}",
+        window_id
+    ));
+    WINDOW_ID.store(window_id, Ordering::Relaxed);
+    if let Err(e) = register_key_event_filter(window_id) {
+        hilog_error!(format!("Failed to register key event filter: {:?}", e));
+        return false;
+    }
+    if let Err(e) = register_touch_event_filter(window_id) {
+        hilog_error!(format!("Failed to register touch event filter: {:?}", e));
+        return false;
+    }
+    true
+}
+
+#[allow(dead_code)]
+#[napi]
+fn re_register_event_filters() -> bool {
+    let window_id = WINDOW_ID.load(Ordering::Relaxed);
+    if window_id == 0 {
+        hilog_error!("Window ID not initialized");
+        return false;
+    }
+    register_event_filters(window_id)
+}
+
+#[allow(dead_code)]
+#[napi]
+fn unregister_event_filters() -> bool {
+    let window_id = WINDOW_ID.load(Ordering::Relaxed);
+    if window_id == 0 {
+        hilog_error!("Window ID not initialized");
+        return false;
+    }
+    unsafe {
+        if let Err(e) = OH_NativeWindowManager_UnregisterKeyEventFilter(window_id) {
+            hilog_error!(format!("Failed to unregister key event filter: {:?}", e));
+            return false;
+        }
+        if let Err(e) = OH_NativeWindowManager_UnregisterTouchEventFilter(window_id) {
+            hilog_error!(format!("Failed to unregister touch event filter: {:?}", e));
+            return false;
+        }
+    }
+    false
+}
+
+unsafe extern "C" fn touch_event_filter(touch_event: *mut Input_TouchEvent) -> bool {
     if !touch_event.is_null() {
         let action = OH_Input_GetTouchEventAction(touch_event);
         let x = OH_Input_GetTouchEventDisplayX(touch_event);
@@ -537,19 +538,8 @@ unsafe extern "C" fn touch_event_callback(touch_event: *const Input_TouchEvent) 
             time: (action_time / 1000) as u64,
         });
     }
+    true
 }
-
-unsafe extern "C" fn mouse_event_callback(mouse_event: *const Input_MouseEvent) {
-    if !mouse_event.is_null() {
-        unsafe {
-            let _action = OH_Input_GetMouseEventAction(mouse_event);
-            let _x = OH_Input_GetMouseEventDisplayX(mouse_event);
-            let _y = OH_Input_GetMouseEventDisplayY(mouse_event);
-        }
-    }
-}
-
-unsafe extern "C" fn axis_event_callback(_axis_event: *const Input_AxisEvent) {}
 
 pub fn load_file<F: Fn(crate::fs::Response) + 'static>(path: &str, on_loaded: F) {
     let response = load_file_sync(path);
