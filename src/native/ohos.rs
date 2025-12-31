@@ -13,6 +13,7 @@ use ohos_xcomponent_sys::{
     OH_NativeXComponent_GetKeyEventAction, OH_NativeXComponent_GetKeyEventCode,
     OH_NativeXComponent_RegisterKeyEventCallback, OH_NativeXComponent_SetExpectedFrameRateRange,
 };
+use ohos_qos_sys::{OH_QoS_SetThreadQoS, QoS_Level_QOS_USER_INTERACTIVE};
 mod keycodes;
 pub use crate::gl::{self, *};
 use crate::{OHOS_ENV, OHOS_EXPORTS};
@@ -333,6 +334,15 @@ where
     let tx2 = tx.clone();
     MESSAGES_TX.with(move |messages_tx| *messages_tx.borrow_mut() = Some(tx2));
     thread::spawn(move || {
+        //set thread QoS to USER INTERACTIVE
+        unsafe {
+            let ret = OH_QoS_SetThreadQoS(QoS_Level_QOS_USER_INTERACTIVE);
+            if ret < 0 {
+                hilog_error!(format!("Failed to set thread QoS, ret: {}", ret));
+            } else {
+                hilog_info!("Thread QoS set to USER_INTERACTIVE");
+            }
+        }
         let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
         // skip all the messages until android will be able to actually open a window
         //
