@@ -166,6 +166,9 @@ impl MainThreadState {
                 error
             ));
         }
+        if let Some(egl_swap_interval) = self.libegl.eglSwapInterval {
+            egl_swap_interval(self.egl_display, 0);
+        }
     }
 
     fn process_message(&mut self, msg: Message) {
