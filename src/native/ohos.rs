@@ -6,6 +6,12 @@ use crate::{
 };
 use ohos_hilog_binding::{hilog_error, hilog_fatal, hilog_info};
 use ohos_input_sys::input_manager::*;
+use ohos_native_buffer_sys::OH_NativeBuffer_Usage_NATIVEBUFFER_USAGE_CPU_READ;
+use ohos_native_window_sys::{
+    NativeWindowOperation_GET_USAGE, NativeWindowOperation_SET_USAGE,
+    OH_NativeWindow_NativeWindowHandleOpt,
+};
+use ohos_qos_sys::{OH_QoS_SetThreadQoS, QoS_Level_QOS_USER_INTERACTIVE};
 use ohos_sys_opaque_types::{Input_AxisEvent, Input_MouseEvent, Input_TouchEvent};
 use ohos_xcomponent_binding::{WindowRaw, XComponent};
 use ohos_xcomponent_sys::{
@@ -13,7 +19,6 @@ use ohos_xcomponent_sys::{
     OH_NativeXComponent_GetKeyEventAction, OH_NativeXComponent_GetKeyEventCode,
     OH_NativeXComponent_RegisterKeyEventCallback, OH_NativeXComponent_SetExpectedFrameRateRange,
 };
-use ohos_qos_sys::{OH_QoS_SetThreadQoS, QoS_Level_QOS_USER_INTERACTIVE};
 mod keycodes;
 pub use crate::gl::{self, *};
 use crate::{OHOS_ENV, OHOS_EXPORTS};
@@ -449,6 +454,27 @@ where
     });
 
     xcomponent.on_surface_created(|xcomponent, win: WindowRaw| {
+        unsafe {
+            let mut usage: u64 = 0;
+            let ret = OH_NativeWindow_NativeWindowHandleOpt(
+                win.0 as _,
+                NativeWindowOperation_GET_USAGE as i32,
+                &mut usage as *mut u64,
+            );
+            if ret != 0 {
+                usage &= !(OH_NativeBuffer_Usage_NATIVEBUFFER_USAGE_CPU_READ as u64);
+                let ret2 = OH_NativeWindow_NativeWindowHandleOpt(
+                    win.0 as _,
+                    NativeWindowOperation_SET_USAGE as i32,
+                    usage,
+                );
+                if ret2 != 0 {
+                    hilog_error!("Failed to set buffer usage, ret: {}", ret2);
+                }
+            } else {
+                hilog_error!("Failed to get buffer usage, ret: {}", ret);
+            }
+        }
         send_message(Message::SurfaceCreated { window: win });
         let sz = xcomponent.size(win)?;
         let width = sz.width as i32;
