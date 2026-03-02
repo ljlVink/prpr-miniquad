@@ -528,13 +528,17 @@ unsafe fn create_native_window(surface: ndk_sys::jobject) -> *mut ndk_sys::ANati
 
 #[no_mangle]
 pub unsafe extern "C" fn Java_quad_1native_QuadNative_initializeContext(
-    _: *mut ndk_sys::JNIEnv,
+    env: *mut ndk_sys::JNIEnv,
     _: ndk_sys::jobject,
     activity: ndk_sys::jobject,
 ) {
     let env = attach_jni_env();
-    let activity = (**env).NewGlobalRef.unwrap()(env, activity);
-    ndk_context::initialize_android_context(std::mem::transmute(VM), activity as _);
+    let activity_ref = (**env).NewGlobalRef.unwrap()(env, activity);
+    ndk_context::initialize_android_context(std::mem::transmute(VM), activity_ref as _);
+
+    let mut env = unsafe { jni::JNIEnv::from_raw(env as *mut jni::sys::JNIEnv).unwrap() };
+    let context = unsafe { jni::objects::JObject::from_raw(activity as jni::sys::jobject) };
+    let _ = rustls_platform_verifier::android::init_with_env(&mut env, context);
 }
 
 #[no_mangle]

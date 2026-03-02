@@ -36,9 +36,11 @@ winapi = { version = "0.3", features = [
 ] }
 
 [target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21.1"
 libc = "0.2"
-ndk-sys = "0.2"
 ndk-context = "0.1"
+ndk-sys = "0.2"
+rustls-platform-verifier = "0.6.2"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc = "0.2"
@@ -46,6 +48,9 @@ objc = "0.2"
 [dev-dependencies]
 glam = { version = "0.14", features = ["scalar-math"] }
 quad-rand = "0.1"
+
+[dependencies]
+jni = "0.21.1"
 
 [target.'cfg(target_env = "ohos")'.dependencies]
 ohos-xcomponent-binding = "0.1"
