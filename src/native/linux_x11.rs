@@ -347,9 +347,7 @@ impl X11Display {
         (self.libx11.XFlush)(self.display);
     }
 
-    // TODO: _fullscreen is not used, this function always setting window fullscreen
-    // should be able to able to go back from fullscreen to windowed instead
-    unsafe fn set_fullscreen(&mut self, window: Window, _fullscreen: bool) {
+    unsafe fn set_fullscreen(&mut self, window: Window, fullscreen: bool) {
         let wm_state = (self.libx11.XInternAtom)(
             self.display,
             b"_NET_WM_STATE\x00" as *const u8 as *const _,
@@ -361,59 +359,39 @@ impl X11Display {
             false as _,
         );
 
-        // this is the first method to make window fullscreen
-        // hide it, change _NET_WM_STATE_FULLSCREEN property and than show it back
-        // someone on stackoverflow mentioned that this is not working on ubuntu/unity though
-        {
-            (self.libx11.XLowerWindow)(self.display, window);
-            (self.libx11.XUnmapWindow)(self.display, window);
-            (self.libx11.XSync)(self.display, false as _);
+        // EWMH 标准做法：向根窗口发送 ClientMessage 告知窗口管理器
+        let mut data = [0isize; 5];
 
-            let mut atoms: [Atom; 2] = [wm_fullscreen, 0 as _];
-            (self.libx11.XChangeProperty)(
-                self.display,
-                window,
-                wm_state,
-                4 as _,
-                32,
-                PropModeReplace,
-                atoms.as_mut_ptr() as *mut _ as *mut _,
-                1,
-            );
-            (self.libx11.XMapWindow)(self.display, window);
-            (self.libx11.XRaiseWindow)(self.display, window);
-            (self.libx11.XFlush)(self.display);
-        }
+        // 核心逻辑：
+        // _NET_WM_STATE_REMOVE = 0 (退出全屏)
+        // _NET_WM_STATE_ADD    = 1 (进入全屏)
+        data[0] = if fullscreen { 1 } else { 0 };
+        data[1] = wm_fullscreen as isize;
+        data[2] = 0; // 第二个属性（如果需要同时切换两个状态，如 StayOnTop）
+        data[3] = 1; // 源指示器 (1 表示应用程序)
 
-        // however, this is X, so just in case - the second method
-        // send ClientMessage to the window with request to change property to fullscreen
-        {
-            let mut data = [0isize; 5];
+        let mut ev = XClientMessageEvent {
+            type_0: 33, // ClientMessage
+            serial: 0,
+            send_event: true as _,
+            message_type: wm_state,
+            window,
+            display: self.display,
+            format: 32,
+            data: ClientMessageData {
+                l: std::mem::transmute::<[isize; 5], [i64; 5]>(data),
+            },
+        };
 
-            data[0] = 1;
-            data[1] = wm_fullscreen as isize;
-            data[2] = 0;
+        (self.libx11.XSendEvent)(
+            self.display as _,
+            self.root,
+            false as _,
+            (1048576 | 131072) as _,
+            &mut ev as *mut XClientMessageEvent as *mut _,
+        );
 
-            let mut ev = XClientMessageEvent {
-                type_0: 33,
-                serial: 0,
-                send_event: true as _,
-                message_type: wm_state,
-                window: window,
-                display: self.display,
-                format: 32,
-                data: ClientMessageData {
-                    l: std::mem::transmute(data),
-                },
-            };
-            (self.libx11.XSendEvent)(
-                self.display as _,
-                self.root,
-                false as _,
-                (1048576 | 131072) as _,
-                &mut ev as *mut XClientMessageEvent as *mut _,
-            );
-        }
+        (self.libx11.XFlush)(self.display);
     }
 
     pub unsafe fn set_cursor_grab(&mut self, window: Window, grab: bool) {
