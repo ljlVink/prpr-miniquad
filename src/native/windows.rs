@@ -31,6 +31,8 @@ mod wgl;
 
 use libopengl32::LibOpengl32;
 
+const WHEEL_DELTA: f32 = 120.0;
+
 pub(crate) struct Display {
     fullscreen: bool,
     dpi_aware: bool,
@@ -503,10 +505,19 @@ unsafe extern "system" fn win32_wndproc(
             // );
         }
         WM_MOUSEHWHEEL => {
+            let delta = (HIWORD(wparam as _) as i16) as f32;
             event_handler.mouse_wheel_event(
                 context.with_display(display),
-                (HIWORD(wparam as _) as i16) as f32,
+                delta / WHEEL_DELTA,
                 0.0,
+            );
+        }
+        WM_MOUSEWHEEL => {
+            let delta = (HIWORD(wparam as _) as i16) as f32;
+            event_handler.mouse_wheel_event(
+                context.with_display(display),
+                0.0,
+                delta / WHEEL_DELTA,
             );
         }
         WM_CHAR => {
