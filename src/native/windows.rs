@@ -257,9 +257,7 @@ fn get_qpc_frequency_inverse() -> f64 {
     }
 
     let mut freq: i64 = 0;
-    let result = unsafe {
-        QueryPerformanceFrequency(&mut freq as *mut i64 as *mut _)
-    };
+    let result = unsafe { QueryPerformanceFrequency(&mut freq as *mut i64 as *mut _) };
     if result == 0 || freq == 0 {
         panic!("Critical error: The hardware or OS does not support QueryPerformanceFrequency.");
     }
@@ -400,10 +398,8 @@ unsafe extern "system" fn win32_wndproc(
                             POINTER_FLAG_DOWN => TouchPhase::Started,
                             x => panic!("Unsupported touch phase: 0x{:x}", x),
                         };
-                        let time = {
-                            let freq = get_qpc_frequency();
-                            (pointer_info.PerformanceCount as f64) / freq
-                        };
+                        let time =
+                            (pointer_info.PerformanceCount as f64) * get_qpc_frequency_inverse();
 
                         event_handler.touch_event(
                             context.with_display(display),
