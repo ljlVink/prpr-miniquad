@@ -5,6 +5,7 @@ use crate::{
     GraphicsContext,
 };
 use ohos_hilog_binding::{hilog_error, hilog_fatal, hilog_info};
+use ohos_init_binding::canIUse;
 use ohos_input_sys::input_manager::*;
 use ohos_native_buffer_sys::OH_NativeBuffer_Usage_NATIVEBUFFER_USAGE_CPU_READ;
 use ohos_native_window_sys::{
@@ -27,7 +28,16 @@ use napi_ohos::{
     bindgen_prelude::*,
     threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
-use std::{cell::RefCell, sync::mpsc, sync::OnceLock, thread};
+use std::{
+    cell::RefCell,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::mpsc,
+    sync::OnceLock,
+    thread,
+};
+
+static IS_2IN1_DEVICE: AtomicBool = AtomicBool::new(false);
+static INTERCEPTOR: AtomicUsize = AtomicUsize::new(0);
 static REQUEST_CALLBACK: OnceLock<
     ThreadsafeFunction<String, (), String, napi_ohos::Status, false, false, 1>,
 > = OnceLock::new();
@@ -333,6 +343,7 @@ where
     let xcomponent = XComponent::init(*env, *exports).expect("Failed to initialize XComponent");
     let _ = register_xcomponent_callbacks(&xcomponent);
     set_display_sync(&xcomponent);
+    save_2in1_device();
     struct SendHack<F>(F);
     unsafe impl<F> Send for SendHack<F> {}
     let f = SendHack(f);
@@ -503,59 +514,85 @@ where
         send_message(Message::SurfaceDestroyed);
         Ok(())
     });
-    if !set_interceptor_state(true) {
-        hilog_info!("falling back to touch event.");
-        xcomponent.on_touch_event(|_xcomponent, _win, data| {
-            for i in 0..data.num_points {
-                let touch_point = &data.touch_points[i as usize];
-                let phase = match touch_point.event_type {
-                    ohos_xcomponent_binding::TouchEvent::Down => TouchPhase::Started,
-                    ohos_xcomponent_binding::TouchEvent::Up => TouchPhase::Ended,
-                    ohos_xcomponent_binding::TouchEvent::Move => TouchPhase::Moved,
-                    ohos_xcomponent_binding::TouchEvent::Cancel => TouchPhase::Cancelled,
-                    _ => TouchPhase::Cancelled, // Default to cancelled for unknown events
-                };
-                send_message(Message::Touch {
-                    phase,
-                    touch_id: touch_point.id as u64,
-                    x: touch_point.x,
-                    y: touch_point.y,
-                    time: (touch_point.timestamp / 1_000_000) as u64,
-                });
-            }
-            Ok(())
-        });
-    }
+    xcomponent.on_touch_event(|_xcomponent, _win, data| {
+        if INTERCEPTOR.load(Ordering::Acquire) != 0 {
+            return Ok(());
+        }
+        for i in 0..data.num_points {
+            let touch_point = &data.touch_points[i as usize];
+            let phase = match touch_point.event_type {
+                ohos_xcomponent_binding::TouchEvent::Down => TouchPhase::Started,
+                ohos_xcomponent_binding::TouchEvent::Up => TouchPhase::Ended,
+                ohos_xcomponent_binding::TouchEvent::Move => TouchPhase::Moved,
+                ohos_xcomponent_binding::TouchEvent::Cancel => TouchPhase::Cancelled,
+                _ => TouchPhase::Cancelled, // Default to cancelled for unknown events
+            };
+            send_message(Message::Touch {
+                phase,
+                touch_id: touch_point.id as u64,
+                x: touch_point.x,
+                y: touch_point.y,
+                time: (touch_point.timestamp / 1_000_000) as u64,
+            });
+        }
+        Ok(())
+    });
+    //if !set_interceptor_state(true) {
+    //    hilog_info!("Interceptor registration failed, using on_touch_event fallback.");
+    //}
 
     let _ = xcomponent.register_callback();
     let _ = xcomponent.on_frame_callback(|_, _, _| Ok(()));
 }
 
 #[napi]
-fn set_interceptor_state(state: bool) -> bool {
+pub fn set_interceptor_state(state: bool) -> bool {
     if state {
+        if INTERCEPTOR.load(Ordering::Acquire) != 0 {
+            hilog_info!("Interceptor already registered");
+            call_request_callback(r#"{"action":"interceptor_state","state":true}"#.to_string());
+            return true;
+        }
         let callback = Box::new(Input_InterceptorEventCallback {
             mouseCallback: Some(mouse_event_callback),
             touchCallback: Some(touch_event_callback),
             axisCallback: Some(axis_event_callback),
         });
+        let callback = Box::into_raw(callback);
         unsafe {
-            let ret = OH_Input_AddInputEventInterceptor(Box::leak(callback), std::ptr::null_mut());
+            let ret = OH_Input_AddInputEventInterceptor(callback, std::ptr::null_mut());
             if ret.is_err() {
                 hilog_info!("add input Event Interceptor failed , ret: {:?}", ret);
+                call_request_callback(
+                    r#"{"action":"interceptor_state","state":false}"#.to_string(),
+                );
                 return false;
             }
         }
+        INTERCEPTOR.store(callback as usize, Ordering::Release);
+        hilog_info!("Interceptor registered successfully");
+        call_request_callback(r#"{"action":"interceptor_state","state":true}"#.to_string());
     } else {
-        unsafe {
-            let _ = OH_Input_RemoveInputEventInterceptor();
+        let prev = INTERCEPTOR.swap(0, Ordering::AcqRel);
+        if prev != 0 {
+            unsafe {
+                let _ = OH_Input_RemoveInputEventInterceptor();
+            }
+            unsafe {
+                Box::from_raw(prev as *mut Input_InterceptorEventCallback);
+            }
+            hilog_info!("Interceptor removed, falling back to on_touch_event");
         }
+        call_request_callback(r#"{"action":"interceptor_state","state":false}"#.to_string());
     }
     return true;
 }
 
 #[no_mangle]
 unsafe extern "C" fn touch_event_callback(touch_event: *const Input_TouchEvent) {
+    if INTERCEPTOR.load(Ordering::Acquire) == 0 {
+        return;
+    }
     if !touch_event.is_null() {
         let action = OH_Input_GetTouchEventAction(touch_event);
         let x = OH_Input_GetTouchEventDisplayX(touch_event);
@@ -579,12 +616,32 @@ unsafe extern "C" fn touch_event_callback(touch_event: *const Input_TouchEvent) 
 }
 
 unsafe extern "C" fn mouse_event_callback(mouse_event: *const Input_MouseEvent) {
+    if INTERCEPTOR.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    // in fact we disable mouse support for normal devices
+    // according to Huawei AGC, we must send the mouse event when the device is '2in1'
+    if !IS_2IN1_DEVICE.load(Ordering::Relaxed) {
+        return;
+    }
     if !mouse_event.is_null() {
-        unsafe {
-            let _action = OH_Input_GetMouseEventAction(mouse_event);
-            let _x = OH_Input_GetMouseEventDisplayX(mouse_event);
-            let _y = OH_Input_GetMouseEventDisplayY(mouse_event);
-        }
+        let action = Input_MouseEventAction(OH_Input_GetMouseEventAction(mouse_event) as u32);
+        let x = OH_Input_GetMouseEventDisplayX(mouse_event);
+        let y = OH_Input_GetMouseEventDisplayY(mouse_event);
+        let action_time = OH_Input_GetMouseEventActionTime(mouse_event);
+        let phase = match action {
+            Input_MouseEventAction::MOUSE_ACTION_BUTTON_DOWN => TouchPhase::Started,
+            Input_MouseEventAction::MOUSE_ACTION_MOVE => TouchPhase::Moved,
+            Input_MouseEventAction::MOUSE_ACTION_BUTTON_UP => TouchPhase::Ended,
+            _ => TouchPhase::Cancelled,
+        };
+        send_message(Message::Touch {
+            phase,
+            touch_id: 0,
+            x: x as f32,
+            y: y as f32,
+            time: (action_time / 1000) as u64,
+        });
     }
 }
 
@@ -597,7 +654,16 @@ pub fn load_file<F: Fn(crate::fs::Response) + 'static>(path: &str, on_loaded: F)
 
 fn load_file_sync(path: &str) -> crate::fs::Response {
     let full_path = format!("/data/storage/el1/bundle/entry/resources/resfile/{}", path);
-    std::fs::read(&full_path).map_err(Into::into)
+    match std::fs::read(&full_path) {
+        Ok(data) => Ok(data),
+        Err(e) => {
+            hilog_error!(format!(
+                "load_file_sync: failed to load file: {} - error: {:?}",
+                full_path, e
+            ));
+            Err(e.into())
+        }
+    }
 }
 
 #[napi]
@@ -617,4 +683,11 @@ pub fn call_request_callback(value: String) {
     } else {
         hilog_error!("REQUEST_CALLBACK not initialized");
     }
+}
+
+pub fn save_2in1_device() {
+    // ref:https://developer.huawei.com/consumer/cn/doc/harmonyos-references/js-apis-huksexternalcrypto
+    // this Capability only shows true in 2in1 device.
+    let is_2in1 = canIUse("SystemCapability.Security.Huks.CryptoExtension");
+    IS_2IN1_DEVICE.store(is_2in1, Ordering::Relaxed);
 }
