@@ -141,35 +141,35 @@ impl crate::native::NativeDisplay for Display {
         };
     }
     fn set_fullscreen(&mut self, fullscreen: bool) {
+        if fullscreen == self.fullscreen {
+            return;
+        }
+
         unsafe {
-            let win_style: DWORD = get_win_style(fullscreen, !fullscreen);
-            if fullscreen && !self.fullscreen {
-                SetWindowLongPtrA(self.wnd, GWL_STYLE, win_style as _);
-                SetWindowPos(
-                    self.wnd,
+            let win_style = get_win_style(fullscreen, !fullscreen);
+            let (z_order, w, h) = if fullscreen {
+                (
                     HWND_TOP,
-                    0,
-                    0,
                     GetSystemMetrics(SM_CXSCREEN),
                     GetSystemMetrics(SM_CYSCREEN),
-                    SWP_FRAMECHANGED | SWP_DEFERERASE | SWP_DRAWFRAME,
-                );
-                self.fullscreen = true;
-                ShowWindow(self.wnd, SW_SHOW);
-            } else if !fullscreen && self.fullscreen {
-                SetWindowLongPtrA(self.wnd, GWL_STYLE, win_style as _);
-                SetWindowPos(
-                    self.wnd,
-                    ptr::null_mut(),
-                    0,
-                    0,
-                    973,
-                    608,
-                    SWP_FRAMECHANGED | SWP_DEFERERASE | SWP_DRAWFRAME,
-                );
-                self.fullscreen = false;
-                ShowWindow(self.wnd, SW_SHOW);
-            }
+                )
+            } else {
+                (ptr::null_mut(), 973, 608)
+            };
+
+            SetWindowLongPtrA(self.wnd, GWL_STYLE, win_style as _);
+            SetWindowPos(
+                self.wnd,
+                z_order,
+                0,
+                0,
+                w,
+                h,
+                SWP_FRAMECHANGED | SWP_DEFERERASE | SWP_DRAWFRAME,
+            );
+
+            self.fullscreen = fullscreen;
+            ShowWindow(self.wnd, SW_SHOW);
         }
     }
     fn clipboard_get(&mut self) -> Option<String> {
@@ -924,7 +924,7 @@ where
 
         let (msg_wnd, msg_dc) = create_msg_window();
         let mut display = Display {
-            fullscreen: false,
+            fullscreen: conf.fullscreen,
             dpi_aware: false,
             window_resizable: conf.window_resizable,
             cursor_grabbed: false,
