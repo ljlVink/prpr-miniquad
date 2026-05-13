@@ -7,12 +7,7 @@ use crate::{
 use ohos_hilog_binding::{hilog_error, hilog_fatal, hilog_info};
 use ohos_init_binding::canIUse;
 use ohos_input_sys::input_manager::*;
-use ohos_native_buffer_sys::OH_NativeBuffer_Usage_NATIVEBUFFER_USAGE_CPU_READ;
-use ohos_native_window_sys::{
-    NativeWindowOperation_GET_USAGE, NativeWindowOperation_SET_USAGE,
-    OH_NativeWindow_NativeWindowHandleOpt,
-};
-use ohos_qos_sys::{OH_QoS_SetThreadQoS, QoS_Level_QOS_USER_INTERACTIVE};
+use ohos_qos_binding::{set_thread_qos, QosLevel::UserInteractive};
 use ohos_sys_opaque_types::{Input_AxisEvent, Input_MouseEvent, Input_TouchEvent};
 use ohos_xcomponent_binding::{WindowRaw, XComponent};
 use ohos_xcomponent_sys::{
@@ -42,6 +37,7 @@ static REQUEST_CALLBACK: OnceLock<
     ThreadsafeFunction<String, (), String, napi_ohos::Status, false, false, 1>,
 > = OnceLock::new();
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum Message {
     SurfaceChanged {
@@ -90,6 +86,7 @@ fn send_message(message: Message) {
 struct OHOSDisplay {
     screen_width: f32,
     screen_height: f32,
+    #[allow(dead_code)]
     fullscreen: bool,
 }
 
@@ -308,7 +305,7 @@ fn set_display_sync(xcomponent: &XComponent) -> bool {
 }
 pub unsafe extern "C" fn on_dispatch_key_event(
     xcomponent: *mut OH_NativeXComponent,
-    window: *mut std::os::raw::c_void,
+    _window: *mut std::os::raw::c_void,
 ) {
     let mut event = std::ptr::null_mut();
     let ret = OH_NativeXComponent_GetKeyEvent(xcomponent, &mut event);
@@ -354,13 +351,9 @@ where
     MESSAGES_TX.with(move |messages_tx| *messages_tx.borrow_mut() = Some(tx2));
     thread::spawn(move || {
         //set thread QoS to USER INTERACTIVE
-        unsafe {
-            let ret = OH_QoS_SetThreadQoS(QoS_Level_QOS_USER_INTERACTIVE);
-            if ret < 0 {
-                hilog_error!(format!("Failed to set thread QoS, ret: {}", ret));
-            } else {
-                hilog_info!("Thread QoS set to USER_INTERACTIVE");
-            }
+        let result = set_thread_qos(UserInteractive);
+        if let Err(e) = result {
+            hilog_error!("failed to set thread Qos, err={:?}", e);
         }
         let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
         // skip all the messages until android will be able to actually open a window
@@ -465,27 +458,6 @@ where
     });
 
     xcomponent.on_surface_created(|xcomponent, win: WindowRaw| {
-        unsafe {
-            let mut usage: u64 = 0;
-            let ret = OH_NativeWindow_NativeWindowHandleOpt(
-                win.0 as _,
-                NativeWindowOperation_GET_USAGE as i32,
-                &mut usage as *mut u64,
-            );
-            if ret != 0 {
-                usage &= !(OH_NativeBuffer_Usage_NATIVEBUFFER_USAGE_CPU_READ as u64);
-                let ret2 = OH_NativeWindow_NativeWindowHandleOpt(
-                    win.0 as _,
-                    NativeWindowOperation_SET_USAGE as i32,
-                    usage,
-                );
-                if ret2 != 0 {
-                    hilog_error!("Failed to set buffer usage, ret: {}", ret2);
-                }
-            } else {
-                hilog_error!("Failed to get buffer usage, ret: {}", ret);
-            }
-        }
         send_message(Message::SurfaceCreated { window: win });
         let sz = xcomponent.size(win)?;
         let width = sz.width as i32;
