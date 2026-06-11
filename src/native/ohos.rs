@@ -4,6 +4,11 @@ use crate::{
     native::NativeDisplay,
     GraphicsContext,
 };
+use hms_opengtx_binding::{
+    ConfigDescription, EngineType, FrameRenderInfo, GameSceneInfo, GameType, LtpoMode,
+    OpenGtxContext, PictureQualityMaxLevel, ResolutionValue, SceneId, Vector3,
+};
+use ohos_bundle_binding::get_bundle_info;
 use ohos_hilog_binding::{hilog_error, hilog_fatal, hilog_info};
 use ohos_init_binding::canIUse;
 use ohos_input_sys::input_manager::*;
@@ -11,9 +16,8 @@ use ohos_qos_binding::{set_thread_qos, QosLevel::UserInteractive};
 use ohos_sys_opaque_types::{Input_AxisEvent, Input_MouseEvent, Input_TouchEvent};
 use ohos_xcomponent_binding::{WindowRaw, XComponent};
 use ohos_xcomponent_sys::{
-    OH_NativeXComponent, OH_NativeXComponent_ExpectedRateRange, OH_NativeXComponent_GetKeyEvent,
-    OH_NativeXComponent_GetKeyEventAction, OH_NativeXComponent_GetKeyEventCode,
-    OH_NativeXComponent_RegisterKeyEventCallback, OH_NativeXComponent_SetExpectedFrameRateRange,
+    OH_NativeXComponent, OH_NativeXComponent_GetKeyEvent, OH_NativeXComponent_GetKeyEventAction,
+    OH_NativeXComponent_GetKeyEventCode, OH_NativeXComponent_RegisterKeyEventCallback,
 };
 mod keycodes;
 pub use crate::gl::{self, *};
@@ -31,7 +35,14 @@ use std::{
     thread,
 };
 
+const OPENGTX_MIN_FPS: i32 = 120;
+const OPENGTX_TARGET_FPS: i32 = 144;
+const OPENGTX_MAX_FPS: i32 = 144;
+// This flag is used for debugging and to disable OpenGTX functionality.
+const OPENGTX_DISABLE_FLAG_PATH: &str = "/data/storage/el2/base/disable_opengtx";
+
 static IS_2IN1_DEVICE: AtomicBool = AtomicBool::new(false);
+static OPENGTX_ENABLED: AtomicBool = AtomicBool::new(true);
 static INTERCEPTOR: AtomicUsize = AtomicUsize::new(0);
 static REQUEST_CALLBACK: OnceLock<
     ThreadsafeFunction<String, (), String, napi_ohos::Status, false, false, 1>,
@@ -119,6 +130,135 @@ impl NativeDisplay for OHOSDisplay {
     }
 }
 
+struct OpenGtxState {
+    context: OpenGtxContext,
+}
+
+impl OpenGtxState {
+    fn new(width: i32, height: i32) -> Option<Self> {
+        if !is_opengtx_enabled() {
+            return None;
+        }
+
+        let mut context = match OpenGtxContext::with_temp_callback(|temp_level| {
+            hilog_info!("OpenGTX temperature level changed: {:?}", temp_level);
+        }) {
+            Ok(context) => context,
+            Err(err) => {
+                hilog_info!("OpenGTX is unavailable on this device: {}", err);
+                return None;
+            }
+        };
+
+        let bundle_name = get_bundle_info().bundle_name.to_string();
+        let thread_id = current_thread_id();
+        let config = ConfigDescription {
+            mode: LtpoMode::SceneMode,
+            target_fps: OPENGTX_TARGET_FPS,
+            package_name: bundle_name,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            engine_type: EngineType::Unity,
+            engine_version: "miniquad".to_string(),
+            game_type: GameType::Moba,
+            picture_quality_max_level: PictureQualityMaxLevel::Uhd,
+            resolution_max_value: ResolutionValue { height, width },
+            game_main_thread_id: thread_id,
+            game_render_thread_id: thread_id,
+            game_key_thread_ids: [
+                tid_of("OS_AudioPlayCb").unwrap_or(0),
+                tid_of("OS_AudioStateCB").unwrap_or(0),
+                0,
+                tid_of("gpu-work-server").unwrap_or(0),
+                0,
+            ],
+            vulkan_support: false,
+        };
+
+        if let Err(err) = context.set_configuration(&config) {
+            hilog_error!("HMS_OpenGTX_SetConfiguration failed: {}", err);
+            return None;
+        }
+
+        if let Err(err) = context.activate() {
+            hilog_error!("HMS_OpenGTX_Activate failed: {}", err);
+            return None;
+        }
+        
+        let mut state = OpenGtxState { context };
+        state.dispatch_scene_info(width, height);
+        hilog_info!("OpenGTX activated");
+        Some(state)
+    }
+
+    fn deactivate(&mut self) {
+        if let Err(err) = self.context.deactivate() {
+            hilog_error!("HMS_OpenGTX_Deactivate failed: {}", err);
+        } else {
+            hilog_info!("OpenGTX deactivated");
+        }
+    }
+
+    fn dispatch_scene_info(&mut self, width: i32, height: i32) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+
+        let scene_info = GameSceneInfo {
+            scene_id: SceneId::Playing,
+            description: "playing".to_string(),
+            recommend_fps: OPENGTX_TARGET_FPS,
+            min_fps: OPENGTX_MIN_FPS,
+            max_fps: OPENGTX_MAX_FPS,
+            resolution_cur_value: ResolutionValue { height, width },
+        };
+
+        if let Err(err) = self.context.dispatch_game_scene_info(&scene_info) {
+            hilog_error!("HMS_OpenGTX_DispatchGameSceneInfo failed: {}", err);
+        }
+    }
+
+    fn dispatch_frame_render_info(&mut self) {
+        let frame_render_info = FrameRenderInfo {
+            main_camera_position: Vector3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            main_camera_rotate: Vector3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        };
+
+        if let Err(err) = self.context.dispatch_frame_render_info(frame_render_info) {
+            hilog_error!("HMS_OpenGTX_DispatchFrameRenderInfo failed: {}", err);
+        }
+    }
+}
+
+
+fn is_opengtx_enabled() -> bool {
+    OPENGTX_ENABLED.load(Ordering::Acquire)
+}
+
+fn current_thread_id() -> i32 {
+    unsafe extern "C" {
+        fn gettid() -> i32;
+    }
+
+    unsafe { gettid() }
+}
+
+fn tid_of(name: &str) -> Option<i32> {
+    let entries = std::fs::read_dir("/proc/self/task").ok()?;
+    entries.filter_map(|entry| entry.ok()).find_map(|entry| {
+        let tid = entry.file_name().to_string_lossy().parse::<i32>().ok()?;
+        let thread_name = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+        (thread_name.trim() == name).then_some(tid)
+    })
+}
+
 struct MainThreadState {
     libegl: LibEgl,
     context: GraphicsContext,
@@ -129,6 +269,8 @@ struct MainThreadState {
     display: OHOSDisplay,
     window: WindowRaw,
     event_handler: Box<dyn EventHandler>,
+    opengtx: Option<OpenGtxState>,
+    dumped_threads_after_first_frame: bool,
     quit: bool,
 }
 
@@ -190,6 +332,9 @@ impl MainThreadState {
             },
             Message::SurfaceDestroyed => unsafe {
                 self.destroy_surface();
+                if let Some(mut opengtx) = self.opengtx.take() {
+                    opengtx.deactivate();
+                }
             },
             Message::SurfaceChanged {
                 window,
@@ -202,6 +347,17 @@ impl MainThreadState {
 
                 self.display.screen_width = width as _;
                 self.display.screen_height = height as _;
+                if is_opengtx_enabled() {
+                    match &mut self.opengtx {
+                        Some(opengtx) => opengtx.dispatch_scene_info(width, height),
+                        None if self.dumped_threads_after_first_frame => {
+                            self.opengtx = OpenGtxState::new(width, height);
+                        }
+                        None => {}
+                    }
+                } else if let Some(mut opengtx) = self.opengtx.take() {
+                    opengtx.deactivate();
+                }
                 self.event_handler.resize_event(
                     self.context.with_display(&mut self.display),
                     width as _,
@@ -271,7 +427,20 @@ impl MainThreadState {
                 .draw(self.context.with_display(&mut self.display));
 
             unsafe {
+                if let Some(opengtx) = &mut self.opengtx {
+                    opengtx.dispatch_frame_render_info();
+                }
                 (self.libegl.eglSwapBuffers.unwrap())(self.egl_display, self.surface);
+            }
+
+            if !self.dumped_threads_after_first_frame {
+                self.dumped_threads_after_first_frame = true;
+                if is_opengtx_enabled() && self.opengtx.is_none() {
+                    self.opengtx = OpenGtxState::new(
+                        self.display.screen_width as i32,
+                        self.display.screen_height as i32,
+                    );
+                }
             }
         }
     }
@@ -291,17 +460,29 @@ fn register_xcomponent_callbacks(xcomponent: &XComponent) -> napi_ohos::Result<(
 }
 
 fn set_display_sync(xcomponent: &XComponent) -> bool {
-    let native_xcomponent = xcomponent.raw();
-    let mut expected_rate_range = OH_NativeXComponent_ExpectedRateRange {
-        min: 110,
-        max: 120,
-        expected: 120,
-    };
-    let res = unsafe {
-        OH_NativeXComponent_SetExpectedFrameRateRange(native_xcomponent, &mut expected_rate_range)
-    };
-    hilog_info!("Set display sync: {}", res);
-    res == 0
+    if !is_opengtx_enabled() {
+        hilog_info!(
+            "Skip display sync because OpenGTX is disabled by {}",
+            OPENGTX_DISABLE_FLAG_PATH
+        );
+        return false;
+    }
+
+    match xcomponent.set_frame_rate(OPENGTX_MIN_FPS, OPENGTX_MAX_FPS, OPENGTX_TARGET_FPS) {
+        Ok(()) => {
+            hilog_info!(
+                "Set display sync to {}-{} Hz, expected {}",
+                OPENGTX_MIN_FPS,
+                OPENGTX_MAX_FPS,
+                OPENGTX_TARGET_FPS
+            );
+            true
+        }
+        Err(err) => {
+            hilog_error!("Failed to set display sync: {}", err);
+            false
+        }
+    }
 }
 pub unsafe extern "C" fn on_dispatch_key_event(
     xcomponent: *mut OH_NativeXComponent,
@@ -315,7 +496,7 @@ pub unsafe extern "C" fn on_dispatch_key_event(
     let ret = OH_NativeXComponent_GetKeyEventAction(event, &mut action);
     assert!(ret == 0, "Get key event action failed");
 
-    let mut code = ohos_input_sys::key_code::Input_KeyCode::KEYCODE_FN;
+    let code = ohos_input_sys::key_code::Input_KeyCode::KEYCODE_FN;
     let ret = OH_NativeXComponent_GetKeyEventCode(event, &mut std::mem::transmute(code));
     assert!(ret == 0, "Get key event code failed");
 
@@ -339,6 +520,7 @@ where
         .expect("OHOS_EXPORTS is not initialized");
     let xcomponent = XComponent::init(*env, *exports).expect("Failed to initialize XComponent");
     let _ = register_xcomponent_callbacks(&xcomponent);
+    OPENGTX_ENABLED.store(!std::path::Path::new(OPENGTX_DISABLE_FLAG_PATH).exists(), Ordering::Release);
     set_display_sync(&xcomponent);
     save_2in1_device();
     struct SendHack<F>(F);
@@ -424,6 +606,8 @@ where
             display,
             window,
             event_handler,
+            opengtx: None,
+            dumped_threads_after_first_frame: false,
             quit: false,
         };
 
@@ -456,7 +640,7 @@ where
         (s.libegl.eglDestroyContext.unwrap())(s.egl_display, s.egl_context);
         (s.libegl.eglTerminate.unwrap())(s.egl_display);
     });
-
+    
     xcomponent.on_surface_created(|xcomponent, win: WindowRaw| {
         send_message(Message::SurfaceCreated { window: win });
         let sz = xcomponent.size(win)?;
@@ -551,7 +735,7 @@ pub fn set_interceptor_state(state: bool) -> bool {
                 let _ = OH_Input_RemoveInputEventInterceptor();
             }
             unsafe {
-                Box::from_raw(prev as *mut Input_InterceptorEventCallback);
+                drop(Box::from_raw(prev as *mut Input_InterceptorEventCallback));
             }
             hilog_info!("Interceptor removed, falling back to on_touch_event");
         }
